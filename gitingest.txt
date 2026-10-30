@@ -1,0 +1,1175 @@
+Directory structure:
+└── Test-Optimisation/
+    ├── README.md
+    ├── output.json
+    ├── pyproject.toml
+    ├── requirements.txt
+    ├── .env.example
+    ├── infra_optimizer/
+    │   ├── __init__.py
+    │   ├── __main__.py
+    │   ├── config.py
+    │   ├── graph.py
+    │   ├── llm.py
+    │   ├── models.py
+    │   ├── nodes.py
+    │   └── playbook.py
+    └── tests/
+        └── test_pipeline.py
+
+================================================
+FILE: README.md
+================================================
+# Optimisation de l'infrastructure technique
+
+Pipeline qui analyse les logs de supervision d'une PME, détecte les anomalies et
+propose des actions d'optimisation à Jean, le CTO.
+
+- **Entrée** : [data/rapport.json](data/rapport.json), 500 relevés toutes les 30 min.
+- **Sortie** : [output.json](output.json), au format demandé.
+
+## Lancer le projet
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate          # Linux/macOS : source .venv/bin/activate
+pip install -r requirements.txt
+
+python -m infra_optimizer        # lit data/rapport.json, écrit output.json
+python -m pytest                 # 10 tests
+```
+
+Options : `--input`, `--output`, et `--no-llm` pour n'utiliser que les règles.
+Le LLM (Claude) n'est appelé que si `ANTHROPIC_API_KEY` est définie, par exemple
+dans un fichier `.env` (voir `.env.example`).
+
+## Architecture
+
+Le pipeline est un graphe LangGraph de 6 étapes qui se partagent un même état :
+chaque étape lit ce dont elle a besoin et y ajoute ses résultats.
+
+```mermaid
+flowchart LR
+    ingest --> analyze --> detect_anomalies --> recommend
+    recommend -- clé API --> refine_with_llm --> build_report
+    recommend -- sinon --> build_report
+```
+
+| Étape | Rôle |
+|---|---|
+| `ingest` | Lit le JSON, écarte les relevés invalides (ex. CPU à 150 %), trie par date |
+| `analyze` | Calcule les indicateurs (latence moyenne, CPU max…) et la disponibilité de chaque service |
+| `detect_anomalies` | Compare chaque métrique à ses seuils et chaque service à son objectif de disponibilité |
+| `recommend` | Choisit dans le catalogue les recommandations déclenchées par les anomalies |
+| `refine_with_llm` | *(optionnel)* Claude priorise et reformule les recommandations |
+| `build_report` | Assemble le rapport final |
+
+| Fichier | Contenu |
+|---|---|
+| [config.py](infra_optimizer/config.py) | Tous les réglages : seuils par métrique, objectif de disponibilité, modèle LLM |
+| [playbook.py](infra_optimizer/playbook.py) | Le catalogue des recommandations |
+| [models.py](infra_optimizer/models.py) | Format d'un relevé, format du rapport, état du graphe |
+| [nodes.py](infra_optimizer/nodes.py) | Les étapes `ingest` → `build_report` (sauf le LLM) |
+| [llm.py](infra_optimizer/llm.py) | L'étape LLM |
+| [graph.py](infra_optimizer/graph.py) | L'enchaînement des étapes |
+| [\_\_main\_\_.py](infra_optimizer/__main__.py) | La ligne de commande |
+
+## Choix techniques
+
+- **Python** : c'est le langage de référence pour la donnée et l'IA. Pour 500 relevés,
+  le module standard `statistics` suffit, sans pandas.
+- **LangGraph** : il rend les étapes et leur enchaînement explicites, y compris le
+  passage optionnel par le LLM. Ajouter une étape se fait en une ligne.
+- **Pydantic** : il valide les relevés en entrée, garantit le format du rapport en
+  sortie et impose un format de réponse au LLM.
+- **Les calculs sont faits par du code, pas par le LLM.** Les chiffres d'un rapport
+  doivent être exacts et reproductibles. Le LLM se contente de reformuler et de
+  prioriser.
+- **Les recommandations sont des données, pas du code.** Le catalogue est une simple
+  liste de dictionnaires, facile à relire et à compléter.
+- **Le LLM est encadré.**
+  - Sa réponse suit un format imposé, vérifié automatiquement.
+  - Il ne peut pas modifier les paramètres techniques.
+  - En cas d'erreur (réseau, clé, quota, réponse invalide), le rapport est quand
+    même produit avec les recommandations du catalogue.
+  - Le SDK officiel d'Anthropic est utilisé directement, avec le modèle
+    `claude-opus-5-5` par défaut (réglable dans `config.py` ou via `.env`).
+
+## Méthode de détection
+
+- **Métriques.** Chaque métrique a trois seuils dans `config.py` : `low`, `medium`
+  et `high`. Dès que `low` est dépassé, c'est une anomalie, et sa sévérité est le
+  niveau le plus élevé atteint par le pic. On produit une seule anomalie par
+  métrique, plutôt qu'une par relevé.
+- **Services.** La disponibilité d'un service est la part des relevés où il est
+  `online`. En dessous de 99 %, c'est une anomalie : sévérité `high` si le service
+  a été hors ligne, `medium` s'il a seulement été dégradé. On indique aussi le taux
+  d'erreur pendant ses incidents, pour mesurer leur impact réel.
+- **Récurrence.** Si au moins la moitié des intervalles entre deux incidents ont la
+  même durée, la description l'indique (« Récurrent : toutes les 5 h »).
+
+## Choix d'interprétation du format de sortie
+
+- `timestamp` : date de génération du rapport.
+- `insights.error_rate` : taux d'erreur moyen. `insights.uptime_seconds` : uptime au dernier relevé.
+- `anomalies` :
+  - `value` est le pic observé et `threshold` le seuil du niveau de sévérité retenu.
+  - Pour un service, `metric` vaut `<service>_availability_pct`, `value` est sa
+    disponibilité et `threshold` l'objectif de 99 %.
+- `service_status_summary` : chaque service est classé selon son **pire** statut sur
+  la période. Au dernier relevé, tout est `online` : se fier uniquement à ce relevé
+  masquerait les incidents.
+
+## Ce que révèlent les données
+
+1. **Des pics de charge toutes les 5 h.** CPU jusqu'à 99 %, latence de 384 ms contre
+   132 ms habituellement, taux d'erreur de 13 %, et l'API gateway se dégrade.
+2. **La base de données est hors ligne toutes les 3h30**, alors que le taux d'erreur
+   reste normal (0.020 contre 0.032 en moyenne globale). Il s'agit probablement
+   d'une sonde de santé trop sensible ou d'une tâche planifiée, plutôt que d'une
+   vraie panne.
+3. **Le cache se dégrade toutes les 15 h**, au même rythme que les pics de threads.
+4. **Un relevé toutes les 30 min, c'est trop peu** pour mesurer la durée réelle des coupures.
+
+## Modifier le projet
+
+- **Changer un seuil** : modifier la ligne de la métrique dans `config.py`.
+- **Ajouter une recommandation** : ajouter un dictionnaire dans `playbook.py`. Ses
+  textes peuvent citer des mesures, comme `{cpu_usage_max}` ou `{cache_availability_pct}`.
+- **Surveiller une nouvelle métrique** : ajouter le champ dans `LogRecord`
+  (`models.py`) et une ligne dans `THRESHOLDS` (`config.py`).
+- **Ajouter une étape** : écrire une fonction `def mon_etape(state) -> dict` dans
+  `nodes.py`, puis la brancher dans `graph.py`.
+
+## Limites
+
+- Les seuils sont des valeurs courantes, à ajuster avec l'équipe selon ses objectifs.
+- Les gains annoncés sont des estimations.
+- Les données décrivent un seul serveur. Pour un parc, il faudrait un champ `host`
+  et une analyse par machine.
+
+
+
+================================================
+FILE: output.json
+================================================
+{
+  "timestamp": "2026-10-30T10:21:20Z",
+  "insights": {
+    "average_latency_ms": 156.02,
+    "max_cpu_usage": 99.0,
+    "max_memory_usage": 92.0,
+    "error_rate": 0.0316,
+    "uptime_seconds": 1258200.0
+  },
+  "anomalies": [
+    {
+      "metric": "cpu_usage",
+      "value": 99.0,
+      "threshold": 90.0,
+      "severity": "high",
+      "description": "CPU : pic à 99 % (seuil critique : 90 %), 76 relevés au-dessus de 70 % (15.2 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "memory_usage",
+      "value": 92.0,
+      "threshold": 90.0,
+      "severity": "high",
+      "description": "Mémoire : pic à 92 % (seuil critique : 90 %), 60 relevés au-dessus de 75 % (12.0 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "latency_ms",
+      "value": 384.0,
+      "threshold": 300.0,
+      "severity": "high",
+      "description": "Latence : pic à 384 ms (seuil critique : 300 ms), 76 relevés au-dessus de 200 ms (15.2 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "disk_usage",
+      "value": 97.0,
+      "threshold": 90.0,
+      "severity": "high",
+      "description": "Disque : pic à 97 % (seuil critique : 90 %), 49 relevés au-dessus de 80 % (9.8 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "error_rate",
+      "value": 0.13,
+      "threshold": 0.1,
+      "severity": "high",
+      "description": "Taux d'erreur : pic à 0.13 (seuil critique : 0.1), 65 relevés au-dessus de 0.05 (13.0 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "temperature_celsius",
+      "value": 89.0,
+      "threshold": 85.0,
+      "severity": "high",
+      "description": "Température : pic à 89 °C (seuil critique : 85 °C), 61 relevés au-dessus de 70 °C (12.2 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "active_connections",
+      "value": 136.0,
+      "threshold": 120.0,
+      "severity": "high",
+      "description": "Connexions actives : pic à 136 (seuil critique : 120), 49 relevés au-dessus de 75 (9.8 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "network_in_kbps",
+      "value": 2854.0,
+      "threshold": 2600.0,
+      "severity": "high",
+      "description": "Réseau entrant : pic à 2854 kbps (seuil critique : 2600 kbps), 49 relevés au-dessus de 1800 kbps (9.8 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "network_out_kbps",
+      "value": 2301.0,
+      "threshold": 2200.0,
+      "severity": "high",
+      "description": "Réseau sortant : pic à 2301 kbps (seuil critique : 2200 kbps), 51 relevés au-dessus de 1600 kbps (10.2 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "power_consumption_watts",
+      "value": 388.0,
+      "threshold": 380.0,
+      "severity": "high",
+      "description": "Consommation : pic à 388 W (seuil critique : 380 W), 49 relevés au-dessus de 300 W (9.8 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "database_availability_pct",
+      "value": 88.2,
+      "threshold": 99.0,
+      "severity": "high",
+      "description": "Service database : disponible 88.2 % du temps (objectif 99 %), 59 relevés hors ligne et 0 dégradés. Taux d'erreur moyen pendant ces incidents : 0.020 (moyenne globale : 0.032). Récurrent : toutes les 3.5 h."
+    },
+    {
+      "metric": "io_wait",
+      "value": 14.0,
+      "threshold": 10.0,
+      "severity": "medium",
+      "description": "Attente I/O : pic à 14 % (seuil majeur : 10 %), 51 relevés au-dessus de 7 % (10.2 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "thread_count",
+      "value": 189.0,
+      "threshold": 180.0,
+      "severity": "medium",
+      "description": "Threads : pic à 189 (seuil majeur : 180), 16 relevés au-dessus de 170 (3.2 % du temps). Récurrent : toutes les 15 h."
+    },
+    {
+      "metric": "api_gateway_availability_pct",
+      "value": 86.6,
+      "threshold": 99.0,
+      "severity": "medium",
+      "description": "Service api_gateway : disponible 86.6 % du temps (objectif 99 %), 0 relevés hors ligne et 67 dégradés. Taux d'erreur moyen pendant ces incidents : 0.099 (moyenne globale : 0.032). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "cache_availability_pct",
+      "value": 93.2,
+      "threshold": 99.0,
+      "severity": "medium",
+      "description": "Service cache : disponible 93.2 % du temps (objectif 99 %), 0 relevés hors ligne et 34 dégradés. Taux d'erreur moyen pendant ces incidents : 0.045 (moyenne globale : 0.032). Récurrent : toutes les 15 h."
+    }
+  ],
+  "recommendations": [
+    {
+      "id": "REC-DB-RELIABILITY",
+      "action": "Diagnostiquer les coupures récurrentes de la base de données (tâche planifiée, sonde de santé trop sensible), puis ajouter un réplica avec bascule automatique",
+      "target": "database",
+      "parameters": {
+        "health_check": {
+          "interval_seconds": 10,
+          "failure_threshold": 3
+        },
+        "standby_replicas": 1,
+        "failover": "automatic",
+        "client_retry": {
+          "max_attempts": 3,
+          "backoff": "exponential"
+        }
+      },
+      "benefit_estimate": "Disponibilité de la base de 88.2 % à plus de 99.9 %."
+    },
+    {
+      "id": "REC-AUTOSCALING",
+      "action": "Mettre en place un autoscaling horizontal des serveurs applicatifs, déclenché à 65 % de CPU, et ajouter de la capacité avant les pics récurrents",
+      "target": "application_servers",
+      "parameters": {
+        "scaling_metric": "cpu_usage",
+        "target_cpu_pct": 65,
+        "min_replicas": 2,
+        "max_replicas": 4,
+        "scale_out_cooldown_seconds": 60,
+        "scale_in_cooldown_seconds": 600
+      },
+      "benefit_estimate": "CPU de pointe ramené de 99 % à environ 65 % ; latence de pointe ramenée de 384 ms vers son niveau normal (132 ms)."
+    },
+    {
+      "id": "REC-API-GATEWAY",
+      "action": "Protéger l'API gateway : répartition de charge least-connections, limitation de débit par client et circuit breaker vers les services amont",
+      "target": "api_gateway",
+      "parameters": {
+        "load_balancing": "least_connections",
+        "rate_limit": {
+          "strategy": "token_bucket",
+          "burst_pct": 20
+        },
+        "circuit_breaker": {
+          "error_rate_threshold": 0.05,
+          "open_seconds": 30
+        }
+      },
+      "benefit_estimate": "Disponibilité de l'API gateway de 86.6 % à plus de 99 % ; taux d'erreur de pointe (0.13) contenu sous 0.05."
+    },
+    {
+      "id": "REC-CACHE-THREADS",
+      "action": "Stabiliser le cache : identifier le traitement récurrent qui le dégrade, plafonner le pool de threads et revoir la politique d'éviction",
+      "target": "cache",
+      "parameters": {
+        "thread_pool_max_size": 170,
+        "eviction_policy": "allkeys-lru",
+        "memory_headroom_pct": 20
+      },
+      "benefit_estimate": "Disponibilité du cache de 93.2 % à plus de 99 % ; fin des pics de threads (jusqu'à 189 contre 151 habituellement)."
+    },
+    {
+      "id": "REC-STORAGE-IO",
+      "action": "Sécuriser le stockage : rotation des logs, fichiers temporaires sur un volume dédié, extension du volume de 30 % et passage à un stockage SSD plus rapide",
+      "target": "storage",
+      "parameters": {
+        "log_retention_days": 7,
+        "volume_extension_pct": 30,
+        "disk_alert_pct": 80,
+        "storage_tier": "SSD NVMe"
+      },
+      "benefit_estimate": "Pic disque de 97 % ramené sous 75 % ; attente I/O de pointe de 14 % ramenée vers 3 %."
+    },
+    {
+      "id": "REC-THERMAL-POWER",
+      "action": "Contrôler le refroidissement des serveurs (flux d'air, ventilateurs, climatisation) et alerter au-delà de 80 °C",
+      "target": "servers_hardware",
+      "parameters": {
+        "temperature_alert_celsius": 80,
+        "temperature_critical_celsius": 85,
+        "rack_inlet_max_celsius": 27
+      },
+      "benefit_estimate": "Température de pointe de 89 °C ramenée sous 80 °C ; consommation de pointe (388 W) ramenée vers 253 W une fois la charge répartie."
+    },
+    {
+      "id": "REC-OBSERVABILITY",
+      "action": "Renforcer la supervision : un relevé par minute au lieu d'un toutes les 30 min, et des alertes sur les seuils de ce rapport",
+      "target": "monitoring",
+      "parameters": {
+        "collection_interval_seconds": 60,
+        "alert_levels": [
+          "warning",
+          "critical"
+        ]
+      },
+      "benefit_estimate": "Incidents détectés en 1 à 2 minutes au lieu de 30, et durée réelle des coupures enfin mesurable."
+    }
+  ],
+  "service_status_summary": {
+    "online": [],
+    "degraded": [
+      "api_gateway",
+      "cache"
+    ],
+    "offline": [
+      "database"
+    ]
+  }
+}
+
+
+================================================
+FILE: pyproject.toml
+================================================
+[project]
+name = "infra-optimizer"
+version = "1.0.0"
+description = "Pipeline LangGraph d'analyse de journaux d'infrastructure : anomalies et recommandations."
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph>=1.0",
+    "anthropic>=1.17",
+    "pydantic>=2.7",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+
+
+================================================
+FILE: requirements.txt
+================================================
+langgraph==1.2.17
+anthropic==1.17.0
+pydantic==2.14.1
+python-dotenv==1.2.4
+pytest==9.1.1
+
+
+
+================================================
+FILE: .env.example
+================================================
+# Copier en .env pour activer l'affinage des recommandations par Claude.
+ANTHROPIC_API_KEY=
+# Optionnel
+LLM_MODEL=claude-opus-5-5
+LLM_EFFORT=medium
+
+
+
+================================================
+FILE: infra_optimizer/__init__.py
+================================================
+"""Optimisation de l'infrastructure : pipeline LangGraph d'analyse de logs."""
+
+
+
+================================================
+FILE: infra_optimizer/__main__.py
+================================================
+"""Lancement : python -m infra_optimizer [--input data/rapport.json] [--output output.json] [--no-llm]"""
+
+import argparse
+import logging
+import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+from .graph import run_pipeline
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="python -m infra_optimizer")
+    parser.add_argument("--input", default="data/rapport.json", help="fichier de relevés JSON")
+    parser.add_argument("--output", default="output.json", help="rapport à produire")
+    parser.add_argument("--no-llm", action="store_true", help="n'utiliser que le catalogue de règles")
+    args = parser.parse_args(argv)
+
+    load_dotenv()  # lit ANTHROPIC_API_KEY dans un fichier .env s'il existe
+    sys.stdout.reconfigure(encoding="utf-8")  # accents corrects dans la console Windows
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s", stream=sys.stdout)
+
+    try:
+        state = run_pipeline(args.input, use_llm=not args.no_llm)
+    except (OSError, ValueError) as error:  # fichier absent, JSON invalide, aucun relevé valide
+        logging.error(error)
+        return 1
+
+    report = state["report"]
+    Path(args.output).write_text(report.model_dump_json(indent=2), encoding="utf-8")
+    logging.info(
+        "%d anomalies, %d recommandations (source : %s) -> %s",
+        len(report.anomalies), len(report.recommendations), state["source"], args.output,
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+
+
+================================================
+FILE: infra_optimizer/config.py
+================================================
+"""Tous les réglages du projet. Modifier un seuil = modifier une ligne ici."""
+
+import os
+
+# Seuils par métrique : au-delà de `low` c'est une anomalie, et la sévérité
+# retenue est le niveau le plus élevé atteint par le pic.
+THRESHOLDS = {
+    "cpu_usage":               {"label": "CPU",                "unit": "%",    "low": 70,   "medium": 80,   "high": 90},
+    "memory_usage":            {"label": "Mémoire",            "unit": "%",    "low": 75,   "medium": 85,   "high": 90},
+    "latency_ms":              {"label": "Latence",            "unit": "ms",   "low": 200,  "medium": 250,  "high": 300},
+    "disk_usage":              {"label": "Disque",             "unit": "%",    "low": 80,   "medium": 85,   "high": 90},
+    "io_wait":                 {"label": "Attente I/O",        "unit": "%",    "low": 7,    "medium": 10,   "high": 15},
+    "error_rate":              {"label": "Taux d'erreur",      "unit": "",     "low": 0.05, "medium": 0.08, "high": 0.10},
+    "temperature_celsius":     {"label": "Température",        "unit": "°C",   "low": 70,   "medium": 80,   "high": 85},
+    "active_connections":      {"label": "Connexions actives", "unit": "",     "low": 75,   "medium": 100,  "high": 120},
+    "thread_count":            {"label": "Threads",            "unit": "",     "low": 170,  "medium": 180,  "high": 190},
+    "network_in_kbps":         {"label": "Réseau entrant",     "unit": "kbps", "low": 1800, "medium": 2200, "high": 2600},
+    "network_out_kbps":        {"label": "Réseau sortant",     "unit": "kbps", "low": 1600, "medium": 1900, "high": 2200},
+    "power_consumption_watts": {"label": "Consommation",       "unit": "W",    "low": 300,  "medium": 340,  "high": 380},
+}
+
+# Un service est en anomalie s'il est "online" moins de 99 % du temps.
+SERVICE_SLO_PCT = 99.0
+
+# Une anomalie est dite récurrente si au moins 50 % des intervalles entre deux
+# incidents ont la même durée.
+RECURRENCE_MIN_SHARE = 0.5
+
+# LLM (optionnel) : utilisé seulement si ANTHROPIC_API_KEY est définie.
+LLM_MODEL = os.getenv("LLM_MODEL", "claude-opus-5-5")
+LLM_EFFORT = os.getenv("LLM_EFFORT", "medium")
+
+
+
+================================================
+FILE: infra_optimizer/graph.py
+================================================
+"""Le pipeline sous forme de graphe LangGraph :
+
+    ingest -> analyze -> detect_anomalies -> recommend -> (refine_with_llm) -> build_report
+"""
+
+import os
+
+from langgraph.graph import END, START, StateGraph
+
+from .llm import refine_with_llm
+from .models import State
+from .nodes import analyze, build_report, detect_anomalies, ingest, recommend
+
+
+def llm_or_report(state: State) -> str:
+    """Après les règles, on passe par le LLM seulement s'il est activé et qu'une clé API existe."""
+    if state.get("use_llm") and os.getenv("ANTHROPIC_API_KEY"):
+        return "refine_with_llm"
+    return "build_report"
+
+
+def build_graph():
+    graph = StateGraph(State)
+    graph.add_sequence([ingest, analyze, detect_anomalies, recommend])
+    graph.add_node(refine_with_llm)
+    graph.add_node(build_report)
+
+    graph.add_edge(START, "ingest")
+    graph.add_conditional_edges("recommend", llm_or_report, ["refine_with_llm", "build_report"])
+    graph.add_edge("refine_with_llm", "build_report")
+    graph.add_edge("build_report", END)
+    return graph.compile()
+
+
+def run_pipeline(input_path, use_llm: bool = True) -> State:
+    return build_graph().invoke({"input_path": str(input_path), "use_llm": use_llm})
+
+
+
+================================================
+FILE: infra_optimizer/llm.py
+================================================
+"""5. (optionnel) Claude réécrit et priorise les recommandations.
+
+Le LLM ne calcule rien : il reçoit les anomalies et les recommandations déjà
+produites, et renvoie pour chacune une formulation plus contextualisée, dans
+l'ordre de priorité. Les paramètres techniques restent ceux du catalogue.
+En cas de problème, on garde simplement les recommandations du catalogue.
+"""
+
+import json
+import logging
+
+import anthropic
+from pydantic import BaseModel
+
+from .config import LLM_EFFORT, LLM_MODEL
+from .models import State
+
+logger = logging.getLogger(__name__)
+
+PROMPT = """Tu es ingénieur SRE senior et tu conseilles Jean, CTO d'une PME française.
+Tu reçois en JSON les indicateurs, les anomalies détectées et les recommandations d'un moteur de règles.
+Renvoie toutes les recommandations, triées par priorité (impact sur les utilisateurs d'abord), en gardant leur id.
+Pour chacune, réécris `action` (une phrase concrète) et `benefit_estimate` (gain chiffré) en t'appuyant sur
+les anomalies : récurrence, services touchés, chiffres mesurés. N'invente aucune mesure. Réponds en français."""
+
+
+# Format de réponse imposé au modèle (vérifié automatiquement par Pydantic).
+class RewrittenRecommendation(BaseModel):
+    id: str
+    action: str
+    benefit_estimate: str
+
+
+class LLMAnswer(BaseModel):
+    recommendations: list[RewrittenRecommendation]
+
+
+def refine_with_llm(state: State) -> State:
+    context = {
+        "insights": state["insights"].model_dump(),
+        "anomalies": [a.model_dump() for a in state["anomalies"]],
+        "recommendations": [r.model_dump() for r in state["recommendations"]],
+    }
+    try:
+        response = anthropic.Anthropic().beta.messages.parse(
+            model=LLM_MODEL,
+            max_tokens=16000,
+            output_config={"effort": LLM_EFFORT},
+            # Si le modèle décline la requête, l'API la relance sur un modèle de repli.
+            betas=["server-side-fallback-2026-07-01"],
+            fallbacks="default",
+            system=PROMPT,
+            messages=[{"role": "user", "content": json.dumps(context, ensure_ascii=False)}],
+            output_format=LLMAnswer,
+        )
+        answer = response.parsed_output
+        if answer is None:
+            raise ValueError("réponse vide")
+    except (anthropic.APIError, ValueError) as error:  # réseau, clé invalide, quota, réponse non conforme...
+        logger.warning("LLM indisponible (%s) : recommandations du catalogue conservées.", error)
+        return {"source": "rules"}
+
+    # On applique les nouveaux textes, dans l'ordre choisi par le LLM.
+    by_id = {r.id: r for r in state["recommendations"]}
+    rewritten = [
+        by_id[item.id].model_copy(update={"action": item.action, "benefit_estimate": item.benefit_estimate})
+        for item in answer.recommendations
+        if item.id in by_id
+    ]
+    # Filet de sécurité : une recommandation oubliée par le LLM est remise à la fin.
+    kept = {r.id for r in rewritten}
+    rewritten += [r for r in state["recommendations"] if r.id not in kept]
+    return {"recommendations": rewritten, "source": f"llm:{LLM_MODEL}"}
+
+
+
+================================================
+FILE: infra_optimizer/models.py
+================================================
+"""Structures de données : un relevé en entrée, le rapport en sortie, et l'état du graphe."""
+
+from datetime import timedelta
+from typing import Any, Literal, TypedDict
+
+from pydantic import AwareDatetime, BaseModel, Field
+
+Status = Literal["online", "degraded", "offline"]
+Severity = Literal["low", "medium", "high"]
+
+
+# --- Entrée : un relevé du fichier de logs (les bornes rejettent les valeurs impossibles) ---
+class LogRecord(BaseModel):
+    timestamp: AwareDatetime
+    cpu_usage: float = Field(ge=0, le=100)
+    memory_usage: float = Field(ge=0, le=100)
+    latency_ms: float = Field(ge=0)
+    disk_usage: float = Field(ge=0, le=100)
+    network_in_kbps: float = Field(ge=0)
+    network_out_kbps: float = Field(ge=0)
+    io_wait: float = Field(ge=0, le=100)
+    thread_count: int = Field(ge=0)
+    active_connections: int = Field(ge=0)
+    error_rate: float = Field(ge=0, le=1)
+    uptime_seconds: int = Field(ge=0)
+    temperature_celsius: float
+    power_consumption_watts: float = Field(ge=0)
+    service_status: dict[str, Status] = {}
+
+
+# --- Sortie : exactement le schéma demandé ---
+class Insights(BaseModel):
+    average_latency_ms: float
+    max_cpu_usage: float
+    max_memory_usage: float
+    error_rate: float
+    uptime_seconds: float
+
+
+class Anomaly(BaseModel):
+    metric: str
+    value: float
+    threshold: float
+    severity: Severity
+    description: str
+
+
+class Recommendation(BaseModel):
+    id: str
+    action: str
+    target: str
+    parameters: dict[str, Any]
+    benefit_estimate: str
+
+
+class ServiceStatusSummary(BaseModel):
+    online: list[str] = []
+    degraded: list[str] = []
+    offline: list[str] = []
+
+
+class Report(BaseModel):
+    timestamp: str
+    insights: Insights
+    anomalies: list[Anomaly]
+    recommendations: list[Recommendation]
+    service_status_summary: ServiceStatusSummary
+
+
+# --- État partagé entre les nœuds du graphe : chaque nœud ajoute ses clés ---
+class State(TypedDict, total=False):
+    input_path: str  # paramètres d'exécution
+    use_llm: bool
+    records: list[LogRecord]  # ingest
+    step: timedelta
+    insights: Insights  # analyze
+    availability: dict[str, float]
+    service_summary: ServiceStatusSummary
+    anomalies: list[Anomaly]  # detect_anomalies
+    recommendations: list[Recommendation]  # recommend / refine_with_llm
+    source: str
+    report: Report  # build_report
+
+
+
+================================================
+FILE: infra_optimizer/nodes.py
+================================================
+"""Les étapes du pipeline. Chaque nœud reçoit l'état et renvoie les clés qu'il y ajoute."""
+
+import json
+import logging
+import statistics
+from collections import Counter
+from datetime import UTC, datetime, timedelta
+from itertools import pairwise
+from pathlib import Path
+
+from pydantic import ValidationError
+
+from .config import RECURRENCE_MIN_SHARE, SERVICE_SLO_PCT, THRESHOLDS
+from .models import (
+    Anomaly,
+    Insights,
+    LogRecord,
+    Recommendation,
+    Report,
+    ServiceStatusSummary,
+    State,
+)
+from .playbook import PLAYBOOK
+
+logger = logging.getLogger(__name__)
+
+# Sévérités, de la plus grave à la moins grave, avec leur libellé dans les descriptions.
+SEVERITIES = {"high": "critique", "medium": "majeur", "low": "alerte"}
+
+
+def ingest(state: State) -> State:
+    """1. Lit le fichier JSON et garde les relevés valides, triés par date."""
+    data = json.loads(Path(state["input_path"]).read_text(encoding="utf-8"))
+    if isinstance(data, dict):  # l'énoncé montre un relevé seul, le fichier fourni une liste
+        data = [data]
+
+    records = []
+    for index, item in enumerate(data):
+        try:
+            records.append(LogRecord.model_validate(item))
+        except ValidationError:
+            logger.warning("Relevé n°%d ignoré : format invalide.", index)
+    if not records:
+        raise ValueError("Aucun relevé valide dans le fichier.")
+
+    records.sort(key=lambda r: r.timestamp)
+    gaps = [b.timestamp - a.timestamp for a, b in pairwise(records)]
+    step = statistics.median(gaps) if gaps else timedelta(0)  # intervalle habituel entre deux relevés
+    return {"records": records, "step": step}
+
+
+def analyze(state: State) -> State:
+    """2. Calcule les indicateurs globaux et la disponibilité de chaque service."""
+    records = state["records"]
+    insights = Insights(
+        average_latency_ms=round(statistics.mean(r.latency_ms for r in records), 2),
+        max_cpu_usage=max(r.cpu_usage for r in records),
+        max_memory_usage=max(r.memory_usage for r in records),
+        error_rate=round(statistics.mean(r.error_rate for r in records), 4),
+        uptime_seconds=records[-1].uptime_seconds,  # uptime au dernier relevé
+    )
+
+    availability = {}
+    summary = ServiceStatusSummary()
+    for service in sorted({name for r in records for name in r.service_status}):
+        statuses = [r.service_status[service] for r in records if service in r.service_status]
+        availability[service] = round(100 * statuses.count("online") / len(statuses), 1)
+        # On classe le service selon son pire statut sur la période, pour ne pas masquer les incidents.
+        worst = "offline" if "offline" in statuses else "degraded" if "degraded" in statuses else "online"
+        getattr(summary, worst).append(service)
+
+    return {"insights": insights, "availability": availability, "service_summary": summary}
+
+
+def detect_anomalies(state: State) -> State:
+    """3. Compare chaque métrique à ses seuils et chaque service à son objectif de disponibilité."""
+    records, step = state["records"], state["step"]
+    anomalies = []
+
+    for metric, t in THRESHOLDS.items():
+        breaches = [r for r in records if getattr(r, metric) >= t["low"]]
+        if not breaches:
+            continue
+        peak = max(getattr(r, metric) for r in breaches)
+        severity = next(s for s in SEVERITIES if peak >= t[s])  # niveau le plus grave atteint
+        share = 100 * len(breaches) / len(records)
+        description = (
+            f"{t['label']} : pic à {fmt(peak, t['unit'])} (seuil {SEVERITIES[severity]} : {fmt(t[severity], t['unit'])}), "
+            f"{len(breaches)} relevés au-dessus de {fmt(t['low'], t['unit'])} ({share:.1f} % du temps)."
+            + recurrence([r.timestamp for r in breaches], step)
+        )
+        anomalies.append(Anomaly(metric=metric, value=peak, threshold=t[severity], severity=severity, description=description))
+
+    for service, pct in state["availability"].items():
+        if pct >= SERVICE_SLO_PCT:
+            continue
+        incidents = [r for r in records if r.service_status.get(service, "online") != "online"]
+        offline = sum(r.service_status[service] == "offline" for r in incidents)
+        error_rate = statistics.mean(r.error_rate for r in incidents)
+        description = (
+            f"Service {service} : disponible {pct:g} % du temps (objectif {SERVICE_SLO_PCT:g} %), "
+            f"{offline} relevés hors ligne et {len(incidents) - offline} dégradés. "
+            f"Taux d'erreur moyen pendant ces incidents : {error_rate:.3f} (moyenne globale : {state['insights'].error_rate:.3f})."
+            + recurrence([r.timestamp for r in incidents], step)
+        )
+        anomalies.append(
+            Anomaly(
+                metric=f"{service}_availability_pct",
+                value=pct,
+                threshold=SERVICE_SLO_PCT,
+                severity="high" if offline else "medium",
+                description=description,
+            )
+        )
+
+    anomalies.sort(key=lambda a: list(SEVERITIES).index(a.severity))  # les plus graves d'abord
+    return {"anomalies": anomalies}
+
+
+def recommend(state: State) -> State:
+    """4. Retient dans le catalogue (playbook.py) les recommandations déclenchées par les anomalies."""
+    in_anomaly = {a.metric for a in state["anomalies"]}
+    values = measured_values(state)
+
+    recommendations = []
+    for rec in PLAYBOOK:
+        triggered = in_anomaly if rec["when"] == "*" else in_anomaly & set(rec["when"])
+        if triggered:
+            recommendations.append(
+                Recommendation(
+                    id=rec["id"],
+                    action=rec["action"].format(**values),
+                    target=rec["target"],
+                    parameters=rec["parameters"],
+                    benefit_estimate=rec["benefit_estimate"].format(**values),
+                )
+            )
+    return {"recommendations": recommendations, "source": "rules"}
+
+
+def build_report(state: State) -> State:
+    """6. Assemble le rapport final au format demandé."""
+    report = Report(
+        timestamp=datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        insights=state["insights"],
+        anomalies=state["anomalies"],
+        recommendations=state["recommendations"],
+        service_status_summary=state["service_summary"],
+    )
+    return {"report": report}
+
+
+# --- Petites fonctions utilitaires ---
+
+
+def fmt(value: float, unit: str) -> str:
+    """99.0, '%' -> '99 %' ; 0.13, '' -> '0.13'"""
+    return f"{value:g} {unit}".strip()
+
+
+def recurrence(timestamps: list[datetime], step: timedelta) -> str:
+    """Renvoie « Récurrent : toutes les X h. » si la plupart des incidents sont espacés de la même durée."""
+    gaps = [b - a for a, b in pairwise(timestamps) if b - a > step]  # on ignore les relevés consécutifs
+    if len(gaps) < 2:
+        return ""
+    gap, count = Counter(gaps).most_common(1)[0]
+    if count / len(gaps) < RECURRENCE_MIN_SHARE:
+        return ""
+    return f" Récurrent : toutes les {gap.total_seconds() / 3600:g} h."
+
+
+def measured_values(state: State) -> dict[str, str]:
+    """Valeurs que les textes du catalogue peuvent citer : {cpu_usage_max}, {cache_availability_pct}..."""
+    values = {"sampling_minutes": f"{state['step'].total_seconds() / 60:g}"}
+    for metric in THRESHOLDS:
+        column = [getattr(r, metric) for r in state["records"]]
+        values[f"{metric}_max"] = f"{max(column):g}"
+        values[f"{metric}_median"] = f"{statistics.median(column):g}"
+    for service, pct in state["availability"].items():
+        values[f"{service}_availability_pct"] = f"{pct:g}"
+    return values
+
+
+
+================================================
+FILE: infra_optimizer/playbook.py
+================================================
+"""Catalogue des recommandations.
+
+Chaque recommandation est déclenchée dès qu'une des métriques de `when` est en
+anomalie ("*" = dès qu'il y a au moins une anomalie). L'ordre de la liste est
+l'ordre de priorité dans le rapport.
+
+Les textes peuvent citer des valeurs mesurées entre accolades :
+  {cpu_usage_max}, {latency_ms_median}...  -> pic / médiane d'une métrique
+  {database_availability_pct}              -> disponibilité d'un service (%)
+  {sampling_minutes}                       -> intervalle entre deux relevés
+
+Ajouter une recommandation = ajouter un dictionnaire à cette liste.
+"""
+
+PLAYBOOK = [
+    {
+        "id": "REC-DB-RELIABILITY",
+        "when": ["database_availability_pct"],
+        "target": "database",
+        "action": "Diagnostiquer les coupures récurrentes de la base de données (tâche planifiée, sonde de santé trop sensible), puis ajouter un réplica avec bascule automatique",
+        "parameters": {
+            "health_check": {"interval_seconds": 10, "failure_threshold": 3},
+            "standby_replicas": 1,
+            "failover": "automatic",
+            "client_retry": {"max_attempts": 3, "backoff": "exponential"},
+        },
+        "benefit_estimate": "Disponibilité de la base de {database_availability_pct} % à plus de 99.9 %.",
+    },
+    {
+        "id": "REC-AUTOSCALING",
+        "when": ["cpu_usage", "memory_usage", "active_connections"],
+        "target": "application_servers",
+        "action": "Mettre en place un autoscaling horizontal des serveurs applicatifs, déclenché à 65 % de CPU, et ajouter de la capacité avant les pics récurrents",
+        "parameters": {
+            "scaling_metric": "cpu_usage",
+            "target_cpu_pct": 65,
+            "min_replicas": 2,
+            "max_replicas": 4,
+            "scale_out_cooldown_seconds": 60,
+            "scale_in_cooldown_seconds": 600,
+        },
+        "benefit_estimate": "CPU de pointe ramené de {cpu_usage_max} % à environ 65 % ; latence de pointe ramenée de {latency_ms_max} ms vers son niveau normal ({latency_ms_median} ms).",
+    },
+    {
+        "id": "REC-API-GATEWAY",
+        "when": ["api_gateway_availability_pct", "error_rate"],
+        "target": "api_gateway",
+        "action": "Protéger l'API gateway : répartition de charge least-connections, limitation de débit par client et circuit breaker vers les services amont",
+        "parameters": {
+            "load_balancing": "least_connections",
+            "rate_limit": {"strategy": "token_bucket", "burst_pct": 20},
+            "circuit_breaker": {"error_rate_threshold": 0.05, "open_seconds": 30},
+        },
+        "benefit_estimate": "Disponibilité de l'API gateway de {api_gateway_availability_pct} % à plus de 99 % ; taux d'erreur de pointe ({error_rate_max}) contenu sous 0.05.",
+    },
+    {
+        "id": "REC-CACHE-THREADS",
+        "when": ["cache_availability_pct", "thread_count"],
+        "target": "cache",
+        "action": "Stabiliser le cache : identifier le traitement récurrent qui le dégrade, plafonner le pool de threads et revoir la politique d'éviction",
+        "parameters": {
+            "thread_pool_max_size": 170,
+            "eviction_policy": "allkeys-lru",
+            "memory_headroom_pct": 20,
+        },
+        "benefit_estimate": "Disponibilité du cache de {cache_availability_pct} % à plus de 99 % ; fin des pics de threads (jusqu'à {thread_count_max} contre {thread_count_median} habituellement).",
+    },
+    {
+        "id": "REC-STORAGE-IO",
+        "when": ["disk_usage", "io_wait"],
+        "target": "storage",
+        "action": "Sécuriser le stockage : rotation des logs, fichiers temporaires sur un volume dédié, extension du volume de 30 % et passage à un stockage SSD plus rapide",
+        "parameters": {
+            "log_retention_days": 7,
+            "volume_extension_pct": 30,
+            "disk_alert_pct": 80,
+            "storage_tier": "SSD NVMe",
+        },
+        "benefit_estimate": "Pic disque de {disk_usage_max} % ramené sous 75 % ; attente I/O de pointe de {io_wait_max} % ramenée vers {io_wait_median} %.",
+    },
+    {
+        "id": "REC-THERMAL-POWER",
+        "when": ["temperature_celsius", "power_consumption_watts"],
+        "target": "servers_hardware",
+        "action": "Contrôler le refroidissement des serveurs (flux d'air, ventilateurs, climatisation) et alerter au-delà de 80 °C",
+        "parameters": {
+            "temperature_alert_celsius": 80,
+            "temperature_critical_celsius": 85,
+            "rack_inlet_max_celsius": 27,
+        },
+        "benefit_estimate": "Température de pointe de {temperature_celsius_max} °C ramenée sous 80 °C ; consommation de pointe ({power_consumption_watts_max} W) ramenée vers {power_consumption_watts_median} W une fois la charge répartie.",
+    },
+    {
+        "id": "REC-OBSERVABILITY",
+        "when": "*",
+        "target": "monitoring",
+        "action": "Renforcer la supervision : un relevé par minute au lieu d'un toutes les {sampling_minutes} min, et des alertes sur les seuils de ce rapport",
+        "parameters": {
+            "collection_interval_seconds": 60,
+            "alert_levels": ["warning", "critical"],
+        },
+        "benefit_estimate": "Incidents détectés en 1 à 2 minutes au lieu de {sampling_minutes}, et durée réelle des coupures enfin mesurable.",
+    },
+]
+
+
+
+================================================
+FILE: tests/test_pipeline.py
+================================================
+"""Tests du pipeline : petits jeux de données fabriqués + jeu de données fourni."""
+
+import json
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+from infra_optimizer import llm
+from infra_optimizer.__main__ import main
+from infra_optimizer.graph import llm_or_report, run_pipeline
+
+DATASET = Path(__file__).parent.parent / "data" / "rapport.json"
+
+
+def make_records(count=40, spikes=(), outages=()):
+    """Relevés normaux toutes les 30 min, avec des pics de charge et des coupures de la base aux indices donnés."""
+    records = []
+    for i in range(count):
+        record = {
+            "timestamp": (datetime(2023, 10, 1, tzinfo=UTC) + i * timedelta(minutes=30)).isoformat(),
+            "cpu_usage": 55, "memory_usage": 65, "latency_ms": 130, "disk_usage": 60,
+            "network_in_kbps": 1200, "network_out_kbps": 1100, "io_wait": 3, "thread_count": 150,
+            "active_connections": 50, "error_rate": 0.02, "uptime_seconds": 360000 + 1800 * i,
+            "temperature_celsius": 60, "power_consumption_watts": 250,
+            "service_status": {"database": "online", "api_gateway": "online", "cache": "online"},
+        }
+        if i in spikes:
+            record |= {"cpu_usage": 95, "latency_ms": 350, "error_rate": 0.12}
+            record["service_status"]["api_gateway"] = "degraded"
+        if i in outages:
+            record["service_status"]["database"] = "offline"
+        records.append(record)
+    return records
+
+
+@pytest.fixture
+def run(tmp_path):
+    """Exécute le pipeline (sans LLM) sur une liste de relevés et renvoie l'état final."""
+
+    def _run(records):
+        path = tmp_path / "logs.json"
+        path.write_text(json.dumps(records), encoding="utf-8")
+        return run_pipeline(path, use_llm=False)
+
+    return _run
+
+
+def anomaly(state, metric):
+    return next(a for a in state["anomalies"] if a.metric == metric)
+
+
+# --- Détection et recommandations sur des données fabriquées ---
+
+
+def test_healthy_data_gives_empty_report(run):
+    state = run(make_records())
+    assert state["anomalies"] == []
+    assert state["recommendations"] == []
+
+
+def test_invalid_records_are_skipped(run):
+    records = make_records()
+    records[1]["cpu_usage"] = 150  # pourcentage impossible
+    assert len(run(records)["records"]) == 39
+
+
+def test_recurring_cpu_spikes(run):
+    state = run(make_records(spikes=range(0, 40, 10)))  # un pic toutes les 5 h
+    cpu = anomaly(state, "cpu_usage")
+    assert (cpu.value, cpu.threshold, cpu.severity) == (95, 90, "high")
+    assert "toutes les 5 h" in cpu.description
+    assert [r.id for r in state["recommendations"]] == ["REC-AUTOSCALING", "REC-API-GATEWAY", "REC-OBSERVABILITY"]
+    assert "95 %" in state["recommendations"][0].benefit_estimate  # valeur mesurée insérée dans le texte
+
+
+def test_database_outages(run):
+    state = run(make_records(outages=range(3, 40, 7)))  # une coupure toutes les 3h30
+    database = anomaly(state, "database_availability_pct")
+    assert (database.value, database.severity) == (85.0, "high")
+    assert "toutes les 3.5 h" in database.description
+    assert state["service_summary"].offline == ["database"]
+    assert state["recommendations"][0].id == "REC-DB-RELIABILITY"
+
+
+# --- Jeu de données fourni et ligne de commande ---
+
+
+def test_full_dataset():
+    state = run_pipeline(DATASET, use_llm=False)
+    insights = state["insights"]
+    assert (insights.max_cpu_usage, insights.max_memory_usage, insights.uptime_seconds) == (99, 92, 1258200)
+    assert insights.average_latency_ms == pytest.approx(156.02)
+    assert state["service_summary"].degraded == ["api_gateway", "cache"]
+    assert len(state["anomalies"]) == 15
+    assert state["recommendations"][0].id == "REC-DB-RELIABILITY"
+
+
+def test_cli_writes_report_with_expected_schema(tmp_path):
+    output = tmp_path / "output.json"
+    assert main(["--input", str(DATASET), "--output", str(output), "--no-llm"]) == 0
+    report = json.loads(output.read_text(encoding="utf-8"))
+    assert set(report) == {"timestamp", "insights", "anomalies", "recommendations", "service_status_summary"}
+    assert set(report["anomalies"][0]) == {"metric", "value", "threshold", "severity", "description"}
+    assert set(report["recommendations"][0]) == {"id", "action", "target", "parameters", "benefit_estimate"}
+
+
+def test_cli_fails_cleanly_on_missing_file(tmp_path):
+    assert main(["--input", str(tmp_path / "absent.json"), "--no-llm"]) == 1
+
+
+# --- LLM (simulé : aucun appel réseau) ---
+
+
+def fake_claude(monkeypatch, answer):
+    """Remplace le client Anthropic par un faux qui renvoie `answer`."""
+    messages = SimpleNamespace(parse=lambda **kwargs: SimpleNamespace(parsed_output=answer))
+    monkeypatch.setattr(llm.anthropic, "Anthropic", lambda: SimpleNamespace(beta=SimpleNamespace(messages=messages)))
+
+
+def test_llm_is_only_used_with_an_api_key(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert llm_or_report({"use_llm": True}) == "build_report"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    assert llm_or_report({"use_llm": True}) == "refine_with_llm"
+    assert llm_or_report({"use_llm": False}) == "build_report"
+
+
+def test_llm_rewrites_and_reorders(monkeypatch, run):
+    state = run(make_records(spikes=range(0, 40, 10)))
+    rewritten = llm.RewrittenRecommendation(id="REC-API-GATEWAY", action="Nouvelle action", benefit_estimate="Nouveau gain")
+    fake_claude(monkeypatch, llm.LLMAnswer(recommendations=[rewritten]))
+
+    result = llm.refine_with_llm(state)
+
+    first = result["recommendations"][0]
+    assert (first.id, first.action, first.benefit_estimate) == ("REC-API-GATEWAY", "Nouvelle action", "Nouveau gain")
+    assert first.parameters == state["recommendations"][1].parameters  # paramètres inchangés
+    assert len(result["recommendations"]) == 3  # les recommandations oubliées sont gardées
+
+
+def test_llm_failure_keeps_rule_recommendations(monkeypatch, run):
+    state = run(make_records(spikes=range(0, 40, 10)))
+    fake_claude(monkeypatch, None)  # réponse vide (ex. requête déclinée)
+    assert llm.refine_with_llm(state) == {"source": "rules"}
+
+

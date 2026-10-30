@@ -1,7 +1,7 @@
 # Optimisation de l'infrastructure technique
 
 Pipeline qui analyse les logs de supervision d'une PME, détecte les anomalies et
-propose des actions d'optimisation à Jean, le CTO. Énoncé : [docs/enonce.md](docs/enonce.md).
+propose des actions d'optimisation à Jean, le CTO.
 
 - **Entrée** : [data/rapport.json](data/rapport.json), 500 relevés toutes les 30 min.
 - **Sortie** : [output.json](output.json), au format demandé.
