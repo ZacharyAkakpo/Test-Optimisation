@@ -1,0 +1,18 @@
+[project]
+name = "infra-optimizer"
+version = "1.0.0"
+description = "Pipeline LangGraph d'analyse de journaux d'infrastructure : anomalies et recommandations."
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph>=1.0",
+    "anthropic>=1.17",
+    "pydantic>=2.7",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

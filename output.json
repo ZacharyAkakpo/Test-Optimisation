@@ -1,0 +1,225 @@
+{
+  "timestamp": "2026-10-30T10:21:20Z",
+  "insights": {
+    "average_latency_ms": 156.02,
+    "max_cpu_usage": 99.0,
+    "max_memory_usage": 92.0,
+    "error_rate": 0.0316,
+    "uptime_seconds": 1258200.0
+  },
+  "anomalies": [
+    {
+      "metric": "cpu_usage",
+      "value": 99.0,
+      "threshold": 90.0,
+      "severity": "high",
+      "description": "CPU : pic à 99 % (seuil critique : 90 %), 76 relevés au-dessus de 70 % (15.2 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "memory_usage",
+      "value": 92.0,
+      "threshold": 90.0,
+      "severity": "high",
+      "description": "Mémoire : pic à 92 % (seuil critique : 90 %), 60 relevés au-dessus de 75 % (12.0 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "latency_ms",
+      "value": 384.0,
+      "threshold": 300.0,
+      "severity": "high",
+      "description": "Latence : pic à 384 ms (seuil critique : 300 ms), 76 relevés au-dessus de 200 ms (15.2 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "disk_usage",
+      "value": 97.0,
+      "threshold": 90.0,
+      "severity": "high",
+      "description": "Disque : pic à 97 % (seuil critique : 90 %), 49 relevés au-dessus de 80 % (9.8 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "error_rate",
+      "value": 0.13,
+      "threshold": 0.1,
+      "severity": "high",
+      "description": "Taux d'erreur : pic à 0.13 (seuil critique : 0.1), 65 relevés au-dessus de 0.05 (13.0 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "temperature_celsius",
+      "value": 89.0,
+      "threshold": 85.0,
+      "severity": "high",
+      "description": "Température : pic à 89 °C (seuil critique : 85 °C), 61 relevés au-dessus de 70 °C (12.2 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "active_connections",
+      "value": 136.0,
+      "threshold": 120.0,
+      "severity": "high",
+      "description": "Connexions actives : pic à 136 (seuil critique : 120), 49 relevés au-dessus de 75 (9.8 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "network_in_kbps",
+      "value": 2854.0,
+      "threshold": 2600.0,
+      "severity": "high",
+      "description": "Réseau entrant : pic à 2854 kbps (seuil critique : 2600 kbps), 49 relevés au-dessus de 1800 kbps (9.8 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "network_out_kbps",
+      "value": 2301.0,
+      "threshold": 2200.0,
+      "severity": "high",
+      "description": "Réseau sortant : pic à 2301 kbps (seuil critique : 2200 kbps), 51 relevés au-dessus de 1600 kbps (10.2 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "power_consumption_watts",
+      "value": 388.0,
+      "threshold": 380.0,
+      "severity": "high",
+      "description": "Consommation : pic à 388 W (seuil critique : 380 W), 49 relevés au-dessus de 300 W (9.8 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "database_availability_pct",
+      "value": 88.2,
+      "threshold": 99.0,
+      "severity": "high",
+      "description": "Service database : disponible 88.2 % du temps (objectif 99 %), 59 relevés hors ligne et 0 dégradés. Taux d'erreur moyen pendant ces incidents : 0.020 (moyenne globale : 0.032). Récurrent : toutes les 3.5 h."
+    },
+    {
+      "metric": "io_wait",
+      "value": 14.0,
+      "threshold": 10.0,
+      "severity": "medium",
+      "description": "Attente I/O : pic à 14 % (seuil majeur : 10 %), 51 relevés au-dessus de 7 % (10.2 % du temps). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "thread_count",
+      "value": 189.0,
+      "threshold": 180.0,
+      "severity": "medium",
+      "description": "Threads : pic à 189 (seuil majeur : 180), 16 relevés au-dessus de 170 (3.2 % du temps). Récurrent : toutes les 15 h."
+    },
+    {
+      "metric": "api_gateway_availability_pct",
+      "value": 86.6,
+      "threshold": 99.0,
+      "severity": "medium",
+      "description": "Service api_gateway : disponible 86.6 % du temps (objectif 99 %), 0 relevés hors ligne et 67 dégradés. Taux d'erreur moyen pendant ces incidents : 0.099 (moyenne globale : 0.032). Récurrent : toutes les 5 h."
+    },
+    {
+      "metric": "cache_availability_pct",
+      "value": 93.2,
+      "threshold": 99.0,
+      "severity": "medium",
+      "description": "Service cache : disponible 93.2 % du temps (objectif 99 %), 0 relevés hors ligne et 34 dégradés. Taux d'erreur moyen pendant ces incidents : 0.045 (moyenne globale : 0.032). Récurrent : toutes les 15 h."
+    }
+  ],
+  "recommendations": [
+    {
+      "id": "REC-DB-RELIABILITY",
+      "action": "Diagnostiquer les coupures récurrentes de la base de données (tâche planifiée, sonde de santé trop sensible), puis ajouter un réplica avec bascule automatique",
+      "target": "database",
+      "parameters": {
+        "health_check": {
+          "interval_seconds": 10,
+          "failure_threshold": 3
+        },
+        "standby_replicas": 1,
+        "failover": "automatic",
+        "client_retry": {
+          "max_attempts": 3,
+          "backoff": "exponential"
+        }
+      },
+      "benefit_estimate": "Disponibilité de la base de 88.2 % à plus de 99.9 %."
+    },
+    {
+      "id": "REC-AUTOSCALING",
+      "action": "Mettre en place un autoscaling horizontal des serveurs applicatifs, déclenché à 65 % de CPU, et ajouter de la capacité avant les pics récurrents",
+      "target": "application_servers",
+      "parameters": {
+        "scaling_metric": "cpu_usage",
+        "target_cpu_pct": 65,
+        "min_replicas": 2,
+        "max_replicas": 4,
+        "scale_out_cooldown_seconds": 60,
+        "scale_in_cooldown_seconds": 600
+      },
+      "benefit_estimate": "CPU de pointe ramené de 99 % à environ 65 % ; latence de pointe ramenée de 384 ms vers son niveau normal (132 ms)."
+    },
+    {
+      "id": "REC-API-GATEWAY",
+      "action": "Protéger l'API gateway : répartition de charge least-connections, limitation de débit par client et circuit breaker vers les services amont",
+      "target": "api_gateway",
+      "parameters": {
+        "load_balancing": "least_connections",
+        "rate_limit": {
+          "strategy": "token_bucket",
+          "burst_pct": 20
+        },
+        "circuit_breaker": {
+          "error_rate_threshold": 0.05,
+          "open_seconds": 30
+        }
+      },
+      "benefit_estimate": "Disponibilité de l'API gateway de 86.6 % à plus de 99 % ; taux d'erreur de pointe (0.13) contenu sous 0.05."
+    },
+    {
+      "id": "REC-CACHE-THREADS",
+      "action": "Stabiliser le cache : identifier le traitement récurrent qui le dégrade, plafonner le pool de threads et revoir la politique d'éviction",
+      "target": "cache",
+      "parameters": {
+        "thread_pool_max_size": 170,
+        "eviction_policy": "allkeys-lru",
+        "memory_headroom_pct": 20
+      },
+      "benefit_estimate": "Disponibilité du cache de 93.2 % à plus de 99 % ; fin des pics de threads (jusqu'à 189 contre 151 habituellement)."
+    },
+    {
+      "id": "REC-STORAGE-IO",
+      "action": "Sécuriser le stockage : rotation des logs, fichiers temporaires sur un volume dédié, extension du volume de 30 % et passage à un stockage SSD plus rapide",
+      "target": "storage",
+      "parameters": {
+        "log_retention_days": 7,
+        "volume_extension_pct": 30,
+        "disk_alert_pct": 80,
+        "storage_tier": "SSD NVMe"
+      },
+      "benefit_estimate": "Pic disque de 97 % ramené sous 75 % ; attente I/O de pointe de 14 % ramenée vers 3 %."
+    },
+    {
+      "id": "REC-THERMAL-POWER",
+      "action": "Contrôler le refroidissement des serveurs (flux d'air, ventilateurs, climatisation) et alerter au-delà de 80 °C",
+      "target": "servers_hardware",
+      "parameters": {
+        "temperature_alert_celsius": 80,
+        "temperature_critical_celsius": 85,
+        "rack_inlet_max_celsius": 27
+      },
+      "benefit_estimate": "Température de pointe de 89 °C ramenée sous 80 °C ; consommation de pointe (388 W) ramenée vers 253 W une fois la charge répartie."
+    },
+    {
+      "id": "REC-OBSERVABILITY",
+      "action": "Renforcer la supervision : un relevé par minute au lieu d'un toutes les 30 min, et des alertes sur les seuils de ce rapport",
+      "target": "monitoring",
+      "parameters": {
+        "collection_interval_seconds": 60,
+        "alert_levels": [
+          "warning",
+          "critical"
+        ]
+      },
+      "benefit_estimate": "Incidents détectés en 1 à 2 minutes au lieu de 30, et durée réelle des coupures enfin mesurable."
+    }
+  ],
+  "service_status_summary": {
+    "online": [],
+    "degraded": [
+      "api_gateway",
+      "cache"
+    ],
+    "offline": [
+      "database"
+    ]
+  }
+}
